@@ -181,26 +181,13 @@ export function generateContainerName(image: string): string {
 // For example, container.createOptions.container.image is going to overwrite container.image field
 export function mergeContainerWithOptions(
   base: k8s.V1Container,
-  from: k8s.V1Container
+  from: Partial<k8s.V1Container>
 ): void {
   for (const [key, value] of Object.entries(from)) {
-    if (key === 'name') {
-      if (value !== CONTAINER_EXTENSION_PREFIX + base.name) {
-        core.warning("Skipping name override: name can't be overwritten")
-      }
-      continue
-    } else if (key === 'image') {
-      core.warning("Skipping image override: image can't be overwritten")
-      continue
-    } else if (key === 'env') {
-      const envs = value as k8s.V1EnvVar[]
-      base.env = mergeLists(base.env, envs)
-    } else if (key === 'volumeMounts' && value) {
-      const volumeMounts = value as k8s.V1VolumeMount[]
-      base.volumeMounts = mergeLists(base.volumeMounts, volumeMounts)
-    } else if (key === 'ports' && value) {
-      const ports = value as k8s.V1ContainerPort[]
-      base.ports = mergeLists(base.ports, ports)
+    if (['name', 'image'].includes(key)) {
+      core.warning(`Skipping ${key} override: ${key} can't be overwritten`)
+    } else if (['env', 'volumeMounts', 'ports'].includes(key)) {
+      base[key] = mergeLists(base[key], value as any)
     } else {
       base[key] = value
     }
