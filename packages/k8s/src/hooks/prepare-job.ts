@@ -295,7 +295,43 @@ const applyWorkflowDefinedResourceOverrides = (
   const memoryLimit =
     workflowDefinedValues.memoryLimit || runnerDefaults.memoryLimitDefault
 
-  // TODO: Validate that the new values are within the max values defined in the runner
+  /* Ensure the workflow defined limits and requests are within the runner defined max values */
+  if (
+    cpuRequest &&
+    runnerDefaults.cpuRequestMax &&
+    !isCpuValueInBounds(cpuRequest, runnerDefaults.cpuRequestMax)
+  ) {
+    throw new Error(
+      `CPU request value is out of bounds. Value provided: ${cpuRequest}, max value: ${runnerDefaults.cpuRequestMax}`
+    )
+  }
+  if (
+    cpuLimit &&
+    runnerDefaults.cpuLimitMax &&
+    !isCpuValueInBounds(cpuLimit, runnerDefaults.cpuLimitMax)
+  ) {
+    throw new Error(
+      `CPU limit value is out of bounds. Value provided: ${cpuLimit}, max value: ${runnerDefaults.cpuLimitMax}`
+    )
+  }
+  if (
+    memoryRequest &&
+    runnerDefaults.memoryRequestMax &&
+    !isMemoryValueInBounds(memoryRequest, runnerDefaults.memoryRequestMax)
+  ) {
+    throw new Error(
+      `Memory request value is out of bounds. Value provided: ${memoryRequest}, max value: ${runnerDefaults.memoryRequestMax}`
+    )
+  }
+  if (
+    memoryLimit &&
+    runnerDefaults.memoryLimitMax &&
+    !isMemoryValueInBounds(memoryLimit, runnerDefaults.memoryLimitMax)
+  ) {
+    throw new Error(
+      `Memory limit value is out of bounds. Value provided: ${memoryLimit}, max value: ${runnerDefaults.memoryLimitMax}`
+    )
+  }
 
   const resources: Partial<k8s.V1Container> = {
     resources: {
@@ -429,3 +465,41 @@ const getWorkflowDefinedValues = (environmentVariables: {
     memoryLimit
   }
 }
+
+/**
+ * Convert cpu values to be millicores for comparison.
+ */
+const toMilliNumber = (value: string) =>
+  value.endsWith('m') ? Number(value.replace(/\D/g, '')) : Number(value) * 1000
+
+const prefix: { [key: string]: number } = {
+  k: 1000,
+  M: 1000 ** 2,
+  G: 1000 ** 3,
+  T: 1000 ** 4,
+  P: 1000 ** 5,
+  E: 1000 ** 6,
+  Ki: 1024,
+  Mi: 1024 ** 2,
+  Gi: 1024 ** 3,
+  Ti: 1024 ** 4,
+  Pi: 1024 ** 5,
+  Ei: 1024 ** 6
+}
+
+/**
+ * Convert memory values to be bytes for comparison.
+ */
+const toMemNumber = (value: string): number => {
+  const hasUnits = value.match(/^([0-9]+)([A-Za-z]{1,2})$/)
+
+  return hasUnits
+    ? parseInt(hasUnits[1], 10) * prefix[hasUnits[2]]
+    : parseInt(value, 10)
+}
+
+const isCpuValueInBounds = (value: string, max: string): boolean =>
+  toMilliNumber(value) <= toMilliNumber(max)
+
+const isMemoryValueInBounds = (value: string, max: string): boolean =>
+  toMemNumber(value) <= toMemNumber(max)
