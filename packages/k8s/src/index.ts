@@ -16,7 +16,6 @@ async function run(): Promise<void> {
     const command = input['command']
     const responseFile = input['responseFile']
     const state = input['state']
-
     if (!(await isAuthPermissionsOK())) {
       throw new Error(
         `The Service account needs the following permissions ${JSON.stringify(

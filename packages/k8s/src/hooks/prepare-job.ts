@@ -45,8 +45,6 @@ import {
   K8S_CPU_REGEX,
   K8S_MEMORY_REGEX
 } from './constants'
-import { mergeDeepRight } from 'ramda'
-import { exec } from 'child_process'
 
 export async function prepareJob(
   args: PrepareJobArgs,
@@ -258,27 +256,34 @@ export function createContainerSpec(
   )
 
   if (extension) {
-    const from =
-      extension.spec?.containers?.find(
-        c => c.name === CONTAINER_EXTENSION_PREFIX + name
-      ) || {}
+    const from = extension.spec?.containers?.find(
+      c => c.name === CONTAINER_EXTENSION_PREFIX + name
+    )
 
-    mergeContainerWithOptions(podContainer, from)
+    if (from) {
+      mergeContainerWithOptions(podContainer, from)
+    }
   }
 
-  /* Workflow defined overrides applied last, for highest precedence */
-  const finalSpec = applyWorkflowDefinedResourceOverrides(
-    podContainer,
-    container.environmentVariables
-  )
+  applyResourceLimitsAndRequests(podContainer, container.environmentVariables)
 
-  return finalSpec
+  return podContainer
 }
 
 /**
- * Apply resource overrides defined in the workflow to the container spec.
+ * Apply any resource limits and requests to the pod container that are defined in the
+ * workflow or the runner container defaults and ensure the resource limits and requests
+ * are within the bounds defined by the runner. If there were any values defined in the
+ * extensions file, they will be overridden by the values defined in the workflow, but
+ * will override the runner container defaults.
+ *
+ * When applying the resource limits and requests, the order of precedence is:
+ * 1. Values defined in the workflow
+ * 2. Values defined in the extensions file
+ * 3. Values defined in the runner container defaults (defaults used in the absence of any other values)
+ * 4. Nothing is applied if no values are provided
  */
-const applyWorkflowDefinedResourceOverrides = (
+const applyResourceLimitsAndRequests = (
   podContainer: k8s.V1Container,
   environmentVariables: { [key: string]: string }
 ) => {
@@ -286,16 +291,26 @@ const applyWorkflowDefinedResourceOverrides = (
   const workflowDefinedValues = getWorkflowDefinedValues(environmentVariables)
 
   const cpuRequest =
-    workflowDefinedValues.cpuRequest || runnerDefaults.cpuRequestDefault
+    workflowDefinedValues.cpuRequest ||
+    podContainer.resources?.requests?.cpu ||
+    runnerDefaults.cpuRequestDefault
   const cpuLimit =
-    workflowDefinedValues.cpuLimit || runnerDefaults.cpuLimitDefault
+    workflowDefinedValues.cpuLimit ||
+    podContainer.resources?.limits?.cpu ||
+    runnerDefaults.cpuLimitDefault
 
   const memoryRequest =
-    workflowDefinedValues.memoryRequest || runnerDefaults.memoryRequestDefault
+    workflowDefinedValues.memoryRequest ||
+    podContainer.resources?.requests?.memory ||
+    runnerDefaults.memoryRequestDefault
   const memoryLimit =
-    workflowDefinedValues.memoryLimit || runnerDefaults.memoryLimitDefault
+    workflowDefinedValues.memoryLimit ||
+    podContainer.resources?.limits?.memory ||
+    runnerDefaults.memoryLimitDefault
 
-  /* Ensure the workflow defined limits and requests are within the runner defined max values */
+  /*
+  Ensure that the resource values are within the runner defined max values (if max values are provided)
+  */
   if (
     cpuRequest &&
     runnerDefaults.cpuRequestMax &&
@@ -333,20 +348,16 @@ const applyWorkflowDefinedResourceOverrides = (
     )
   }
 
-  const resources: Partial<k8s.V1Container> = {
-    resources: {
-      limits: {
-        ...(cpuLimit ? { cpu: cpuLimit } : {}),
-        ...(memoryLimit ? { memory: memoryLimit } : {})
-      },
-      requests: {
-        ...(cpuRequest ? { cpu: cpuRequest } : {}),
-        ...(memoryRequest ? { memory: memoryRequest } : {})
-      }
+  podContainer.resources = {
+    limits: {
+      ...(cpuLimit ? { cpu: cpuLimit } : {}),
+      ...(memoryLimit ? { memory: memoryLimit } : {})
+    },
+    requests: {
+      ...(cpuRequest ? { cpu: cpuRequest } : {}),
+      ...(memoryRequest ? { memory: memoryRequest } : {})
     }
   }
-
-  return mergeDeepRight(podContainer, resources)
 }
 
 interface DefaultResourceValues {
@@ -377,7 +388,7 @@ const getRunnerDefinedValues = (): DefaultResourceValues => {
     memoryLimitMax: ACTIONS_RUNNER_K8S_MEMORY_LIMIT_MAX
   }
 
-  const runnerDefinedValues: Partial<DefaultResourceValues> = {}
+  const runnerDefinedValues = {}
 
   for (const [key, value] of Object.entries(cpuKeys)) {
     const runnerDefinedValue = process.env[value]
@@ -399,34 +410,7 @@ const getRunnerDefinedValues = (): DefaultResourceValues => {
     runnerDefinedValues[key] = runnerDefinedValue
   }
 
-  if (!isDefaultResourceValue(runnerDefinedValues)) {
-    throw new Error(
-      `Runner defined values are malformed. Values provided: ${JSON.stringify(
-        runnerDefinedValues
-      )}`
-    )
-  }
-
-  return runnerDefinedValues
-}
-
-const isDefaultResourceValue = (
-  value: Partial<DefaultResourceValues> | DefaultResourceValues
-): value is DefaultResourceValues => {
-  const schema: Record<keyof DefaultResourceValues, string> = {
-    cpuRequestDefault: '',
-    cpuLimitDefault: '',
-    memoryRequestDefault: '',
-    memoryLimitDefault: '',
-    cpuRequestMax: '',
-    cpuLimitMax: '',
-    memoryRequestMax: '',
-    memoryLimitMax: ''
-  }
-
-  return Object.keys(schema).every(
-    key => key in value && ['string', 'undefined'].includes(typeof value[key])
-  )
+  return runnerDefinedValues as DefaultResourceValues
 }
 
 const getWorkflowDefinedValues = (environmentVariables: {
