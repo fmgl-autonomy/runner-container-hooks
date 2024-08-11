@@ -275,7 +275,8 @@ export function createContainerSpec(
  * workflow or the runner container defaults and ensure the resource limits and requests
  * are within the bounds defined by the runner. If there were any values defined in the
  * extensions file, they will be overridden by the values defined in the workflow, but
- * will override the runner container defaults.
+ * will override the runner container defaults. Values defined in the extensions file
+ * will also need to be within the bounds defined by the runner max values (if provided).
  *
  * When applying the resource limits and requests, the order of precedence is:
  * 1. Values defined in the workflow
@@ -290,23 +291,34 @@ const applyResourceLimitsAndRequests = (
   const runnerDefaults = getRunnerDefinedValues()
   const workflowDefinedValues = getWorkflowDefinedValues(environmentVariables)
 
-  const cpuRequest =
-    workflowDefinedValues.cpuRequest ||
-    podContainer.resources?.requests?.cpu ||
-    runnerDefaults.cpuRequestDefault
-  const cpuLimit =
-    workflowDefinedValues.cpuLimit ||
-    podContainer.resources?.limits?.cpu ||
-    runnerDefaults.cpuLimitDefault
-
-  const memoryRequest =
-    workflowDefinedValues.memoryRequest ||
-    podContainer.resources?.requests?.memory ||
-    runnerDefaults.memoryRequestDefault
-  const memoryLimit =
-    workflowDefinedValues.memoryLimit ||
-    podContainer.resources?.limits?.memory ||
-    runnerDefaults.memoryLimitDefault
+  const cpuRequest = getResourceValue(
+    workflowDefinedValues.cpuRequest,
+    runnerDefaults.cpuRequestDefault,
+    runnerDefaults.cpuRequestMax,
+    podContainer.resources?.requests?.cpu,
+    'CPU request'
+  )
+  const cpuLimit = getResourceValue(
+    workflowDefinedValues.cpuLimit,
+    runnerDefaults.cpuLimitDefault,
+    runnerDefaults.cpuLimitMax,
+    podContainer.resources?.limits?.cpu,
+    'CPU limit'
+  )
+  const memoryRequest = getResourceValue(
+    workflowDefinedValues.memoryRequest,
+    runnerDefaults.memoryRequestDefault,
+    runnerDefaults.memoryRequestMax,
+    podContainer.resources?.requests?.memory,
+    'Memory request'
+  )
+  const memoryLimit = getResourceValue(
+    workflowDefinedValues.memoryLimit,
+    runnerDefaults.memoryLimitDefault,
+    runnerDefaults.memoryLimitMax,
+    podContainer.resources?.limits?.memory,
+    'Memory limit'
+  )
 
   /*
   Ensure that the resource values are within the runner defined max values (if max values are provided)
@@ -358,6 +370,28 @@ const applyResourceLimitsAndRequests = (
       ...(memoryRequest ? { memory: memoryRequest } : {})
     }
   }
+}
+
+/**
+ * If there's a value defined in the workflow, but no max value is defined in the runner container values, then log a warning
+ * and use the extension files value or the runner default value (if neither of those is defined, the value will be undefined).
+ * This way workflows are prevented from setting values if the runner does not have guardrails in place.
+ */
+const getResourceValue = (
+  workflowDefinedValue: string | undefined,
+  runnerDefaultValue: string | undefined,
+  runnerMaxValue: string | undefined,
+  extensionValue: string | undefined,
+  resource: string
+): string | undefined => {
+  if (workflowDefinedValue && !runnerMaxValue) {
+    core.warning(
+      `${resource} value provided in the workflow, but no max value is defined in the runner container values. Ignoring the workflow value.` +
+        'Please contact your self hosted runner administrator'
+    )
+    return extensionValue || runnerDefaultValue
+  }
+  return workflowDefinedValue || extensionValue || runnerDefaultValue
 }
 
 interface DefaultResourceValues {
