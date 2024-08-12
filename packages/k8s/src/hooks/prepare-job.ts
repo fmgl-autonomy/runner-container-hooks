@@ -387,7 +387,7 @@ const getResourceValue = (
   if (workflowDefinedValue && !runnerMaxValue) {
     core.warning(
       `${resource} value provided in the workflow, but no max value is defined in the runner container values. Ignoring the workflow value.` +
-        'Please contact your self hosted runner administrator'
+        ' Please contact your self hosted runner administrator'
     )
     return extensionValue || runnerDefaultValue
   }
