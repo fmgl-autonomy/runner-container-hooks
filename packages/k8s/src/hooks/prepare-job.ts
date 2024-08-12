@@ -487,8 +487,10 @@ const getWorkflowDefinedValues = (environmentVariables: {
 /**
  * Convert cpu values to be millicores for comparison.
  */
-const toMilliNumber = (value: string) =>
-  value.endsWith('m') ? Number(value.replace(/\D/g, '')) : Number(value) * 1000
+const toMilliNumber = (value: string | number) =>
+  typeof value === 'string' && value.endsWith('m')
+    ? Number(value.replace(/\D/g, ''))
+    : Number(value) * 1000
 
 const prefix: { [key: string]: number } = {
   k: 1000,
@@ -516,8 +518,10 @@ const toMemNumber = (value: string): number => {
     : parseInt(value, 10)
 }
 
-const isCpuValueInBounds = (value: string, max: string): boolean =>
-  toMilliNumber(value) <= toMilliNumber(max)
+const isCpuValueInBounds = (
+  value: string | number,
+  max: string | number
+): boolean => toMilliNumber(value) <= toMilliNumber(max)
 
 const isMemoryValueInBounds = (value: string, max: string): boolean =>
   toMemNumber(value) <= toMemNumber(max)
