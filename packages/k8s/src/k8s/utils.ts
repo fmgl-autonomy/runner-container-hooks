@@ -6,7 +6,10 @@ import { Mount } from 'hooklib'
 import * as path from 'path'
 import { v1 as uuidv4 } from 'uuid'
 import { POD_VOLUME_NAME } from './index'
-import { CONTAINER_EXTENSION_PREFIX } from '../hooks/constants'
+import {
+  ACTIONS_RUNNER_K8S_SKIP_COPY_EXTERNALS,
+  CONTAINER_EXTENSION_PREFIX
+} from '../hooks/constants'
 import * as shlex from 'shlex'
 
 export const DEFAULT_CONTAINER_ENTRY_POINT_ARGS = [`-f`, `/dev/null`]
@@ -58,11 +61,6 @@ export function containerVolumes(
   mounts.push(
     {
       name: POD_VOLUME_NAME,
-      mountPath: '/__e',
-      subPath: 'externals'
-    },
-    {
-      name: POD_VOLUME_NAME,
       mountPath: '/github/home',
       subPath: '_temp/_github_home'
     },
@@ -72,6 +70,14 @@ export function containerVolumes(
       subPath: '_temp/_github_workflow'
     }
   )
+
+  if (process.env[ACTIONS_RUNNER_K8S_SKIP_COPY_EXTERNALS] !== 'true') {
+    mounts.push({
+      name: POD_VOLUME_NAME,
+      mountPath: '/__e',
+      subPath: 'externals'
+    })
+  }
 
   if (!userMountVolumes?.length) {
     return mounts
