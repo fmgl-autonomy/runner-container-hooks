@@ -26,7 +26,11 @@ import {
   PodPhase,
   fixArgs
 } from '../k8s/utils'
-import { CONTAINER_EXTENSION_PREFIX, JOB_CONTAINER_NAME } from './constants'
+import {
+  CONTAINER_EXTENSION_PREFIX,
+  JOB_CONTAINER_NAME,
+  ACTIONS_RUNNER_K8S_SKIP_COPY_EXTERNALS
+} from './constants'
 
 export async function prepareJob(
   args: PrepareJobArgs,
@@ -39,7 +43,9 @@ export async function prepareJob(
   await prunePods()
 
   const extension = readExtensionFromFile()
-  await copyExternalsToRoot()
+  if (process.env[ACTIONS_RUNNER_K8S_SKIP_COPY_EXTERNALS] !== 'true') {
+    await copyExternalsToRoot()
+  }
 
   let container: k8s.V1Container | undefined = undefined
   if (args.container?.image) {

@@ -63,3 +63,6 @@ export class RunnerInstanceLabel {
     return `runner-pod=${this.podName}`
   }
 }
+
+export const ACTIONS_RUNNER_K8S_SKIP_COPY_EXTERNALS =
+  'ACTIONS_RUNNER_K8S_SKIP_COPY_EXTERNALS'
