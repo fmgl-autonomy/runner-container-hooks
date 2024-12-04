@@ -252,5 +252,7 @@ export function createContainerSpec(
     mergeContainerWithOptions(podContainer, from)
   }
 
+  // TODO: Add the event labels to the pod
+
   return podContainer
 }

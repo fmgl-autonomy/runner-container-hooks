@@ -125,6 +125,9 @@ export async function createPod(
     mergePodSpecWithOptions(appPod.spec, extension.spec)
   }
 
+  core.debug('Creating pod with spec:')
+  core.debug(JSON.stringify(appPod, null, 2))
+
   const { body } = await k8sApi.createNamespacedPod(namespace(), appPod)
   return body
 }
