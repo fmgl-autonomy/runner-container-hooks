@@ -11,6 +11,7 @@ import {
   getSecretName,
   getStepPodName,
   getVolumeClaimName,
+  JOB_CONTAINER_NAME,
   RunnerInstanceLabel
 } from '../hooks/constants'
 import {
@@ -20,6 +21,7 @@ import {
   useKubeScheduler,
   fixArgs
 } from './utils'
+import { createHash } from 'crypto'
 
 const kc = new k8s.KubeConfig()
 
@@ -92,6 +94,26 @@ function sanitizeLabel(label: string): string {
   return sluggedLabel
 }
 
+function getArcContextLabels(): { [key: string]: string } {
+  const { GITHUB_RUN_ID, GITHUB_RUN_NUMBER, GITHUB_RUN_ATTEMPT } = process.env
+  return Object.fromEntries(
+    Object.entries({
+      'arc-context-event-name': jobContext.eventName,
+      'arc-context-sha': jobContext.sha,
+      'arc-context-workflow': jobContext.workflow,
+      'arc-context-actor': jobContext.actor,
+      'arc-context-job': jobContext.job,
+      'arc-context-repository': jobContext.repo.repo,
+      'arc-context-repository-owner': jobContext.repo.owner,
+      'arc-context-run-id': GITHUB_RUN_ID || '',
+      'arc-context-run-number': GITHUB_RUN_NUMBER || '',
+      'arc-context-run-attempt': GITHUB_RUN_ATTEMPT || ''
+    })
+      .map(([key, value]) => [key, sanitizeLabel(value)])
+      .filter(([, value]) => value !== '')
+  )
+}
+
 export async function createPod(
   jobContainer?: k8s.V1Container,
   services?: k8s.V1Container[],
@@ -114,22 +136,7 @@ export async function createPod(
   appPod.metadata = new k8s.V1ObjectMeta()
   appPod.metadata.name = getJobPodName()
 
-  const { GITHUB_RUN_ID, GITHUB_RUN_NUMBER, GITHUB_RUN_ATTEMPT } = process.env
-  const arcLabels = Object.fromEntries(
-    Object.entries({
-      'arc-context-event-name': jobContext.eventName,
-      'arc-context-sha': jobContext.sha,
-      'arc-context-workflow': jobContext.workflow,
-      'arc-context-actor': jobContext.actor,
-      'arc-context-job': jobContext.job,
-      'arc-context-repository': jobContext.repo.repo,
-      'arc-context-repository-owner': jobContext.repo.owner,
-      'arc-context-run-id': GITHUB_RUN_ID || '',
-      'arc-context-run-number': GITHUB_RUN_NUMBER || '',
-      'arc-context-run-attempt': GITHUB_RUN_ATTEMPT || ''
-    }).map(([key, value]) => [key, sanitizeLabel(value)])
-  )
-
+  const arcLabels = getArcContextLabels()
   const instanceLabel = new RunnerInstanceLabel()
   appPod.metadata.labels = {
     [instanceLabel.key]: instanceLabel.value,
@@ -204,6 +211,11 @@ export async function createJob(
   job.spec.template.spec = new k8s.V1PodSpec()
   job.spec.template.metadata = new k8s.V1ObjectMeta()
   job.spec.template.metadata.labels = {}
+  const arcLabels = getArcContextLabels()
+  job.metadata.labels = arcLabels
+  job.spec.template.spec = new k8s.V1PodSpec()
+  job.spec.template.metadata = new k8s.V1ObjectMeta()
+  job.spec.template.metadata.labels = arcLabels
   job.spec.template.metadata.annotations = {}
   job.spec.template.spec.containers = [container]
   job.spec.template.spec.restartPolicy = 'Never'
@@ -310,6 +322,265 @@ export async function execPodStep(
       // If exec.exec fails, explicitly reject the outer promise
       .catch(e => reject(e))
   })
+}
+
+export async function execCalculateOutputHash(
+  podName: string,
+  containerName: string,
+  command: string[]
+): Promise<string> {
+  const exec = new k8s.Exec(kc)
+
+  // Create a writable stream that updates a SHA-256 hash with stdout data
+  const hash = createHash('sha256')
+  const hashWriter = new stream.Writable({
+    write(chunk, _enc, cb) {
+      try {
+        hash.update(chunk.toString('utf8') as Buffer)
+        cb()
+      } catch (e) {
+        cb(e as Error)
+      }
+    }
+  })
+
+  await new Promise<void>((resolve, reject) => {
+    exec
+      .exec(
+        namespace(),
+        podName,
+        containerName,
+        command,
+        hashWriter, // capture stdout for hashing
+        process.stderr,
+        null,
+        false /* tty */,
+        resp => {
+          core.debug(`internalExecOutput response: ${JSON.stringify(resp)}`)
+          if (resp.status === 'Success') {
+            resolve()
+          } else {
+            core.debug(
+              JSON.stringify({
+                message: resp?.message,
+                details: resp?.details
+              })
+            )
+            reject(new Error(resp?.message || 'internalExecOutput failed'))
+          }
+        }
+      )
+      .catch(e => reject(e))
+  })
+
+  // finalize hash and return digest
+  hashWriter.end()
+
+  return hash.digest('hex')
+}
+
+export async function localCalculateOutputHash(
+  commands: string[]
+): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const hash = createHash('sha256')
+    const child = spawn(commands[0], commands.slice(1), {
+      stdio: ['ignore', 'pipe', 'ignore']
+    })
+
+    child.stdout.on('data', chunk => {
+      hash.update(chunk)
+    })
+    child.on('error', reject)
+    child.on('close', (code: number) => {
+      if (code === 0) {
+        resolve(hash.digest('hex'))
+      } else {
+        reject(new Error(`child process exited with code ${code}`))
+      }
+    })
+  })
+}
+
+export async function execCpToPod(
+  podName: string,
+  runnerPath: string,
+  containerPath: string
+): Promise<void> {
+  core.debug(`Copying ${runnerPath} to pod ${podName} at ${containerPath}`)
+
+  let attempt = 0
+  while (true) {
+    try {
+      const exec = new k8s.Exec(kc)
+      const command = ['tar', 'xf', '-', '-C', containerPath]
+      const readStream = tar.pack(runnerPath)
+      const errStream = new WritableStreamBuffer()
+      await new Promise((resolve, reject) => {
+        exec
+          .exec(
+            namespace(),
+            podName,
+            JOB_CONTAINER_NAME,
+            command,
+            null,
+            errStream,
+            readStream,
+            false,
+            async status => {
+              if (errStream.size()) {
+                reject(
+                  new Error(
+                    `Error from cpFromPod - details: \n ${errStream.getContentsAsString()}`
+                  )
+                )
+              }
+              resolve(status)
+            }
+          )
+          .catch(e => reject(e))
+      })
+      break
+    } catch (error) {
+      core.debug(`cpToPod: Attempt ${attempt + 1} failed: ${error}`)
+      attempt++
+      if (attempt >= 30) {
+        throw new Error(
+          `cpToPod failed after ${attempt} attempts: ${JSON.stringify(error)}`
+        )
+      }
+      await sleep(1000)
+    }
+  }
+
+  const want = await localCalculateOutputHash([
+    'sh',
+    '-c',
+    listDirAllCommand(runnerPath)
+  ])
+
+  let attempts = 15
+  const delay = 1000
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const got = await execCalculateOutputHash(podName, JOB_CONTAINER_NAME, [
+        'sh',
+        '-c',
+        listDirAllCommand(containerPath)
+      ])
+
+      if (got !== want) {
+        core.debug(
+          `The hash of the directory does not match the expected value; want='${want}' got='${got}'`
+        )
+        await sleep(delay)
+        continue
+      }
+
+      break
+    } catch (error) {
+      core.debug(`Attempt ${i + 1} failed: ${error}`)
+      await sleep(delay)
+    }
+  }
+}
+
+export async function execCpFromPod(
+  podName: string,
+  containerPath: string,
+  parentRunnerPath: string
+): Promise<void> {
+  const targetRunnerPath = `${parentRunnerPath}/${path.basename(containerPath)}`
+  core.debug(
+    `Copying from pod ${podName} ${containerPath} to ${targetRunnerPath}`
+  )
+  const want = await execCalculateOutputHash(podName, JOB_CONTAINER_NAME, [
+    'sh',
+    '-c',
+    listDirAllCommand(containerPath)
+  ])
+
+  let attempt = 0
+  while (true) {
+    try {
+      // make temporary directory
+      const exec = new k8s.Exec(kc)
+      const containerPaths = containerPath.split('/')
+      const dirname = containerPaths.pop() as string
+      const command = [
+        'tar',
+        'cf',
+        '-',
+        '-C',
+        containerPaths.join('/') || '/',
+        dirname
+      ]
+      const writerStream = tar.extract(parentRunnerPath)
+      const errStream = new WritableStreamBuffer()
+
+      await new Promise((resolve, reject) => {
+        exec
+          .exec(
+            namespace(),
+            podName,
+            JOB_CONTAINER_NAME,
+            command,
+            writerStream,
+            errStream,
+            null,
+            false,
+            async status => {
+              if (errStream.size()) {
+                reject(
+                  new Error(
+                    `Error from cpFromPod - details: \n ${errStream.getContentsAsString()}`
+                  )
+                )
+              }
+              resolve(status)
+            }
+          )
+          .catch(e => reject(e))
+      })
+      break
+    } catch (error) {
+      core.debug(`Attempt ${attempt + 1} failed: ${error}`)
+      attempt++
+      if (attempt >= 30) {
+        throw new Error(
+          `execCpFromPod failed after ${attempt} attempts: ${JSON.stringify(
+            error
+          )}`
+        )
+      }
+      await sleep(1000)
+    }
+  }
+
+  let attempts = 15
+  const delay = 1000
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const got = await localCalculateOutputHash([
+        'sh',
+        '-c',
+        listDirAllCommand(targetRunnerPath)
+      ])
+
+      if (got !== want) {
+        core.debug(
+          `The hash of the directory does not match the expected value; want='${want}' got='${got}'`
+        )
+        await sleep(delay)
+        continue
+      }
+
+      break
+    } catch (error) {
+      core.debug(`Attempt ${i + 1} failed: ${error}`)
+      await sleep(delay)
+    }
+  }
 }
 
 export async function waitForJobToComplete(jobName: string): Promise<void> {
@@ -443,7 +714,9 @@ export async function waitForPodPhases(
     }
   } catch (error) {
     throw new Error(
-      `Pod ${podName} is unhealthy with phase status ${phase}: ${JSON.stringify(error)}`
+      `Pod ${podName} is unhealthy with phase status ${phase}: ${JSON.stringify(
+        error
+      )}`
     )
   }
 }
